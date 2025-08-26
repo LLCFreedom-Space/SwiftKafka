@@ -130,8 +130,46 @@ public class KafkaConsumer: KafkaClient {
         }
         return records
     }
-    
-    /// Commit the offsets for the current partition assignment on the broker.  
+
+    /// Consume messages from the topic you are subscribed to.
+    /// The messages will be consumed from your last call to poll.
+    /// This function will suspend for at most `timeout` seconds.
+    /// - Parameter timeout: The maximum `TimeInterval` in seconds that this call will wait while consuming messages.
+    /// - Returns: An array of `KafkaConsumerRecord` that have been consumed.
+    @available(macOS 10.15, *)
+    public func poll(timeout: TimeInterval = 1) async throws -> [KafkaConsumerRecord] {
+        guard !closed else {
+            throw KafkaError(description: "Consumer connection has been closed")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().async {
+                let startDate = Date()
+                var records = [KafkaConsumerRecord]()
+                while Date() < startDate + timeout {
+                    if let msgPointer = rd_kafka_consumer_poll(self.kafkaHandle, Int32(timeout * 100)) {
+                        defer { rd_kafka_message_destroy(msgPointer) }
+
+                        switch msgPointer.pointee.err {
+                        case RD_KAFKA_RESP_ERR_NO_ERROR:
+                            if let record = KafkaConsumerRecord(messagePointer: msgPointer) {
+                                records.append(record)
+                            }
+                        case RD_KAFKA_RESP_ERR__PARTITION_EOF:
+                            continue
+                        default:
+                            let err = Int(msgPointer.pointee.err.rawValue)
+                            continuation.resume(throwing: KafkaError(rawValue: err))
+                            return
+                        }
+                    }
+                }
+                continuation.resume(returning: records)
+            }
+        }
+    }
+
+    /// Commit the offsets for the current partition assignment on the broker.
     /// This marks the records since the last poll as processed so they will not be reassigned during a rebalance.
     /// If you are using `commitSync()`, `enableAutoCommit` on `KafkaConfig` should be set to false.
     public func commitSync() throws {
